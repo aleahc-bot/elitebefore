@@ -1,0 +1,41 @@
+Elite Electrical — the site as it stood on 20 October 2026
+===========================================================
+Taken from elite-site.zip. 242 files: 33 pages, 8 stylesheets, 194 images.
+File dates inside run 19–20 October 2026.
+
+DO NOT UPLOAD THIS AS A ROLLBACK. It is the broken version.
+---------------------------------------------------------
+This snapshot is faithful, which means it still contains the fault that was
+found and fixed on 22 October. Four JavaScript files are referenced by the
+pages but are not in the folder:
+
+    js/index.js            js/builders.js
+    js/new-construction.js js/reviews.js
+
+Only js/site.js and js/actionbar.js are present.
+
+What that does when you open it:
+
+  index.html             22 sections never become visible. The scroll
+                         reveal is in index.js, so without it everything
+                         below the hero stays at zero opacity. This is
+                         exactly the "homepage still broken" problem.
+  new-construction.html  38 community photos missing, and the builder
+                         directory and map do not load at all.
+  reviews.html           11 sections stay invisible.
+
+Three images are also absent: hero-loop.mp4, background-04.jpg,
+background-05.jpg, background-06.jpg.
+
+If you want a version from around this date that actually RUNS, use
+UPLOAD-NOW-BACKUP instead — it is dated 21 October, one day later, and it
+is complete: 33 pages, all five JavaScript files, 194 images, every logo.
+
+Why there is nothing from exactly 20 days ago
+----------------------------------------------
+  20 Oct   this folder                  complete but broken  (17 days ago)
+  21 Oct   UPLOAD-NOW-BACKUP            complete and working (16 days ago)
+  19 Oct   UPLOAD-FINAL                 no logo files at all
+  19 Oct   UPLOAD-TO-GITHUB             25 pages, 9 images missing
+  16 Oct   loose files in the Elite
+           Electrical folder            5 pages only, no css/js/images

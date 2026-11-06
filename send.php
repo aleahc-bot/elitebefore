@@ -190,10 +190,83 @@ function smtp_send(array $cfg, string $from, string $to, string $subject,
     return [$ok, $log];
 }
 
+// --------------------------------------------------------------- attachments
+
+/** What a resume is allowed to be. Anything else is refused by name. */
+const RESUME_MAX   = 3145728;            // 3 MB, matching the form's own check
+const RESUME_TYPES = ['pdf', 'doc', 'docx', 'txt', 'jpg', 'jpeg', 'png', 'webp', 'heic'];
+
+/**
+ * Read an uploaded resume, if there is one.
+ * Returns [filename, mime, raw bytes] or null. Calls finish() and stops on a
+ * file that is present but not acceptable, so the visitor hears about it.
+ */
+function resume_upload(): ?array
+{
+    $f = $_FILES['resume'] ?? null;
+    if (!$f || ($f['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) {
+        return null;                                     // nothing attached
+    }
+    /* The host has its own upload ceiling (upload_max_filesize), which can be
+       lower than our 3 MB. Say what actually happened rather than quote a
+       number that may not be the one that bit. */
+    if ($f['error'] === UPLOAD_ERR_INI_SIZE || $f['error'] === UPLOAD_ERR_FORM_SIZE) {
+        finish(false, 'That file was too large for the server to accept — '
+                    . 'please attach a smaller one, or email it to ' . $TO . '.', 413);
+    }
+    if ($f['error'] !== UPLOAD_ERR_OK || !is_uploaded_file($f['tmp_name'])) {
+        finish(false, 'That file could not be read — please try attaching it again.', 400);
+    }
+    if ((int) $f['size'] > RESUME_MAX) {
+        finish(false, 'That file is too large — please attach one under 3 MB.', 413);
+    }
+
+    $name = preg_replace('/[^\w.\- ]+/u', '_', (string) $f['name']);
+    $name = mb_substr(ltrim($name, '.'), 0, 120);
+    $ext  = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+    if (!in_array($ext, RESUME_TYPES, true)) {
+        finish(false, 'Please attach a PDF, a Word document or a photo.', 415);
+    }
+
+    $bytes = (string) file_get_contents($f['tmp_name']);
+    if ($bytes === '') {
+        finish(false, 'That file came through empty — please try again.', 400);
+    }
+
+    $mime = [
+        'pdf'  => 'application/pdf',
+        'doc'  => 'application/msword',
+        'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'txt'  => 'text/plain',
+        'jpg'  => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'png'  => 'image/png',
+        'webp' => 'image/webp',
+        'heic' => 'image/heic',
+    ][$ext];
+
+    return [$name, $mime, $bytes];
+}
+
 // ------------------------------------------------------------------ guard rails
 
 header('X-Content-Type-Options: nosniff');
 header('Referrer-Policy: same-origin');
+
+/* A GET with ?selftest=1 reports only booleans — no credentials, no paths, no
+   server detail. It exists so "the form errored" can be told apart from "this
+   file is not on the server", which otherwise look identical from outside. */
+if (($_SERVER['REQUEST_METHOD'] ?? '') === 'GET' && ($_GET['selftest'] ?? '') === '1') {
+    header('Content-Type: text/plain; charset=utf-8');
+    $disabled = array_map('trim', explode(',', (string) ini_get('disable_functions')));
+    echo "send.php is here and running.\n\n";
+    echo 'PHP major version : ' . PHP_MAJOR_VERSION . "\n";
+    echo 'mail() available  : ' . (function_exists('mail') && !in_array('mail', $disabled, true) ? 'yes' : 'NO — this is why the form fails') . "\n";
+    echo 'SMTP configured   : ' . ($SMTP['host'] !== '' ? 'yes' : 'no (using the host\'s own mail)') . "\n";
+    echo 'Sends to          : ' . $TO . "\n";
+    echo 'Max upload        : ' . ini_get('upload_max_filesize') . "\n";
+    exit;
+}
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     if (wants_json()) {
@@ -214,6 +287,7 @@ if (clean((string) ($_POST['company'] ?? '')) !== '') {
 $name  = clean((string) ($_POST['name']  ?? ''), 120);
 $phone = clean((string) ($_POST['phone'] ?? ''), 60);
 $email = clean((string) ($_POST['email'] ?? ''), 190);
+$ptype = clean((string) ($_POST['property_type'] ?? ''), 60);
 
 $services = [];
 foreach ((array) ($_POST['services'] ?? []) as $s) {
@@ -242,6 +316,7 @@ $body = implode("\r\n", [
     'Name:     ' . $name,
     'Phone:    ' . ($phone !== '' ? $phone : '(not given)'),
     'Email:    ' . $email,
+    'Property: ' . ($ptype !== '' ? $ptype : '(not given)'),
     'Services: ' . ($services ? implode(', ', $services) : '(none selected)'),
     '',
     'Submitted: ' . date('D j M Y, g:ia T'),
@@ -249,15 +324,47 @@ $body = implode("\r\n", [
 ]) . "\r\n";
 
 $subject = enc_subject($SUBJECT . ' - ' . $name);
+$resume  = resume_upload();
+if ($resume !== null) {
+    $body .= "\r\nFile attached: " . $resume[0] . "\r\n";
+}
 
 $headers = [
     'From: ' . sprintf('%s <%s>', display_name($FROM_NAME), $FROM),
     'Reply-To: ' . sprintf('%s <%s>', display_name($name), $email),
     'MIME-Version: 1.0',
-    'Content-Type: text/plain; charset=UTF-8',
-    'Content-Transfer-Encoding: 8bit',
     'X-Mailer: elite-site-form',
 ];
+
+/* With no attachment this stays a plain-text email, exactly as before. With
+   one, the same text becomes the first part of a multipart message and the
+   file follows it base64-encoded — which both mail() and the SMTP path above
+   send without caring which it is. */
+if ($resume === null) {
+    $headers[] = 'Content-Type: text/plain; charset=UTF-8';
+    $headers[] = 'Content-Transfer-Encoding: 8bit';
+} else {
+    [$rName, $rMime, $rBytes] = $resume;
+    $b = 'elite_' . bin2hex(random_bytes(12));
+    $headers[] = 'Content-Type: multipart/mixed; boundary="' . $b . '"';
+    $body = implode("\r\n", [
+        'This message has an attachment and needs a MIME-capable reader.',
+        '',
+        '--' . $b,
+        'Content-Type: text/plain; charset=UTF-8',
+        'Content-Transfer-Encoding: 8bit',
+        '',
+        $body,
+        '--' . $b,
+        'Content-Type: ' . $rMime . '; name="' . $rName . '"',
+        'Content-Transfer-Encoding: base64',
+        'Content-Disposition: attachment; filename="' . $rName . '"',
+        '',
+        trim(chunk_split(base64_encode($rBytes), 76, "\r\n")),
+        '--' . $b . '--',
+        '',
+    ]);
+}
 
 // ---------------------------------------------------------------------- send
 
@@ -285,8 +392,13 @@ if ($SMTP['host'] !== '') {
 }
 
 if (!$sent) {
-    finish(false, 'We could not send that just now — please call 239.561.1314 '
-                . 'or email ' . $TO . '.', 500);
+    /* Worded differently from the fallback in contact.html on purpose. If you
+       see THIS one, send.php ran and the mail system refused it — which on
+       shared hosting almost always means mail() is disabled and the SMTP
+       block at the top needs filling in. If you see the other one, the
+       browser never reached this file at all. */
+    finish(false, 'Your details reached us but the mail system rejected them. '
+                . 'Please call 239.561.1314 or email ' . $TO . ' directly.', 500);
 }
 
 finish(true, 'Thank you for submitting. Somebody will be in touch with you shortly.');
